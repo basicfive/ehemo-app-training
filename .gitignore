@@ -55,3 +55,17 @@ config.toml
 sd-scripts
 venv
 venv*
+
+.idea
+
+.env
+.env.*
+
+training_logs/*
+
+hairbe/models/*
+!hairbe/models/.gitkeep
+hairbe/train
+
+hairbe/log/*
+hairbe/train_config.toml
