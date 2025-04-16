@@ -68,7 +68,7 @@ class RequestHandler:
         print(f"모델 파일 S3 업로드 {'성공' if upload_success else '실패'}: {s3_key}")
         return upload_success
 
-    def _update_training_config_file(self, lora_model_name: str) -> None:
+    def _update_training_config_file(self, lora_model_name: str, epoch_count: int) -> None:
         """학습 설정 파일(TOML)을 업데이트하는 함수"""
         config_file_path = training_config.config_file_path
         try:
@@ -91,6 +91,10 @@ class RequestHandler:
             # 출력 모델 이름 설정
             config_data['output_name'] = lora_model_name
             config_data['wandb_run_name'] = lora_model_name
+
+            # epoch 설정
+            config_data['epoch'] = epoch_count
+            config_data['save_every_n_epochs'] = epoch_count
             
             # 수정된 설정을 TOML 파일로 저장
             with open(config_file_path, 'w') as f:
@@ -149,9 +153,14 @@ class RequestHandler:
                 print(f"이미지 다운로드 실패: {s3_key}")
                 raise Exception(f"이미지 다운로드 실패: {s3_key}")
         
-    def _build_command(self, lora_model_name: str):
+    def _build_command(self, lora_model_name: str, image_count: int):
+
+        # epoch 설정
+        epoch_count = training_config.total_steps / image_count
+        print(f"image_count : {image_count}, epoch_count : {epoch_count}")
+
         # config file 세팅
-        self._update_training_config_file(lora_model_name=lora_model_name)
+        self._update_training_config_file(lora_model_name=lora_model_name, epoch_count=epoch_count)
         
         # 전체 명령어 구성
         training_command = (
@@ -177,7 +186,7 @@ class RequestHandler:
         self._download_images(image_dir_path=image_dir_path, s3_key_list=message.s3_key_list)
 
         # 학습 명령어 구성
-        training_command = self._build_command(lora_model_name=message.lora_model_name)
+        training_command = self._build_command(lora_model_name=message.lora_model_name, image_count=len(message.s3_key_list))
 
         # 학습 시작
         is_success, training_time_sec = self._start_training(training_command)

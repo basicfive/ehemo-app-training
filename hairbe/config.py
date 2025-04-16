@@ -29,6 +29,7 @@ class TrainingConfig(BaseModel):
     train_logging_dir: str = os.path.join(ROOT_DIR, "hairbe", "train", "log")
     output_dir_path: str = os.path.join(ROOT_DIR, "hairbe", "train", "model")
     sample_prompt_file_path: str = os.path.join(ROOT_DIR, "hairbe", "train", "model", "sample", "prompt.txt")
+    total_steps: int = 2000
 
 
 training_config = TrainingConfig()
