@@ -11,6 +11,7 @@ tensorflow==2.15.0.post1
 onnxruntime-gpu==1.19.2
 
 pika
+aio-pika
 boto3
 botocore
 python-dotenv

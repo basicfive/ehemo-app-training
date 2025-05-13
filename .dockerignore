@@ -14,3 +14,9 @@ venv/
 **/.github
 **/.vscode
 **/*.ps1
+
+ehemo/models/*
+!ehemo/models/.gitkeep
+ehemo/train
+
+ehemo/log/*

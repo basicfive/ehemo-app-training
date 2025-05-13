@@ -5,7 +5,7 @@ from botocore.exceptions import ClientError
 from botocore.client import Config
 import os
 
-from hairbe.s3.s3_config import s3_config
+from ehemo.s3.s3_config import s3_config
 
 class S3Client:
     def __init__(

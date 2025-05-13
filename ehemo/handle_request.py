@@ -3,46 +3,73 @@ import time
 import os
 import json
 import subprocess
+import asyncio
+import concurrent.futures
+import logging
 from typing import Tuple, List
 from datetime import datetime
 from enum import Enum, auto
-from hairbe.config import training_config
-from hairbe.mq.mq_config import rabbit_mq_config
-from hairbe.s3.s3_service import S3Client
-from hairbe.mq.mq_service import RabbitMQService
-from hairbe.dto.training import UserFaceTrainingJobMQConsumeMessage, UserFaceTrainingJobMQPublishMessage, Gender
+from ehemo.config import training_config
+from ehemo.mq.mq_config import rabbit_mq_config
+from ehemo.mq.mq_service import AsyncRabbitMQService
+from ehemo.s3.s3_service import S3Client
+from ehemo.dto.training import TrainingJobMQConsumeMessage, TrainingJobMQPublishMessage, Gender
 import toml
-from hairbe.hairbe_utils import get_extension_from_content_type
+from ehemo.ehemo_utils import get_extension_from_content_type
+
+logger = logging.getLogger(__name__)
 
 class RequestHandler:
     def __init__(
         self,
         s3_client: S3Client,
-        message_publisher: RabbitMQService,
+        message_publisher: AsyncRabbitMQService,
     ):
         self.s3_client = s3_client
         self.message_publisher = message_publisher
-
-    def _publish_message(self, message: UserFaceTrainingJobMQPublishMessage):
-        """상태 업데이트를 MQ로 전송"""
-        message_json = message.model_dump_json()
+        # 별도의 스레드 풀 생성 (학습은 CPU 집약적 작업이므로)
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+ 
+    async def handle_training_request(self, ch, method, properties, body: bytes):
+        """동기 방식의 메시지 핸들러 (기존 코드)"""
+        dict_data = json.loads(body)
+        message = TrainingJobMQConsumeMessage(**dict_data)
         try:
-            self.message_publisher.publish_message(
-                publish_queue=rabbit_mq_config.RABBITMQ_TRAINING_PUBLISH,
-                message=message_json.encode('utf-8')
+            whole_process_time_sec = await asyncio.get_event_loop().run_in_executor(
+                self.executor, 
+                self._process_training_request, 
+                message
             )
+            is_success = True
         except Exception as e:
-            print(f"Error sending status update: {str(e)}")
-            # 연결 재시도
-            try:
-                self.message_publisher.connect()
-                # 재연결 후 다시 시도
-                self.message_publisher.publish_message(
-                    publish_queue=rabbit_mq_config.RABBITMQ_TRAINING_PUBLISH,
-                    message=message_json.encode('utf-8')
-                )
-            except Exception as reconnect_error:
-                print(f"Failed to reconnect and send status: {str(reconnect_error)}")
+            logger.error(f"학습 요청 실패: {e}")
+            whole_process_time_sec = 0
+            is_success = False
+        finally:
+            await self._publish_message_async(
+                message=TrainingJobMQPublishMessage(
+                    is_success=is_success,
+                    training_job_id=message.training_job_id,
+                    user_hair_lora_s3_key=message.user_hair_lora_s3_key,
+                    user_hair_lora_name=message.user_hair_lora_name,
+                    actual_training_time_sec=whole_process_time_sec,
+                ).model_dump_json()
+            )
+   
+    async def _publish_message_async(self, message: TrainingJobMQPublishMessage):
+        """비동기적으로 상태 업데이트를 MQ로 전송"""
+        if self.message_publisher is None:
+            logger.error("메시지 발행자가 설정되지 않았습니다.")
+            return
+            
+        try:
+            await self.message_publisher.publish_message(
+                publish_queue=rabbit_mq_config.RABBITMQ_TRAINING_PUBLISH,
+                message=message.model_dump_json(),
+            )
+            logger.info(f"처리 결과 메시지 발행 성공: {message.training_job_id}")
+        except Exception as e:
+            logger.error(f"처리 결과 메시지 발행 실패: {e}")
 
     def _upload_model_to_s3(self, file_path: str, s3_key: str, retry_count: int = 0) -> bool:
         print(f"모델 파일 S3 업로드 시도: {file_path} -> {s3_key}")
@@ -68,7 +95,12 @@ class RequestHandler:
         print(f"모델 파일 S3 업로드 {'성공' if upload_success else '실패'}: {s3_key}")
         return upload_success
 
-    def _update_training_config_file(self, lora_model_name: str, epoch_count: int) -> None:
+    def _update_training_config_file(
+        self,
+        lora_model_name: str,
+        epoch: int,
+        total_steps: int,
+    ) -> None:
         """학습 설정 파일(TOML)을 업데이트하는 함수"""
         config_file_path = training_config.config_file_path
         try:
@@ -93,9 +125,9 @@ class RequestHandler:
             config_data['wandb_run_name'] = lora_model_name
 
             # epoch 설정
-            config_data['epoch'] = epoch_count
-            config_data['save_every_n_epochs'] = epoch_count
-            
+            config_data['epoch'] = epoch
+            config_data['save_every_n_epochs'] = epoch
+            config_data['max_train_steps'] = total_steps
             # 수정된 설정을 TOML 파일로 저장
             with open(config_file_path, 'w') as f:
                 toml.dump(config_data, f)
@@ -153,14 +185,22 @@ class RequestHandler:
                 print(f"이미지 다운로드 실패: {s3_key}")
                 raise Exception(f"이미지 다운로드 실패: {s3_key}")
         
-    def _build_command(self, lora_model_name: str, image_count: int):
-
+    def _build_command(
+        self,
+        lora_model_name: str,
+        epoch: int,
+        total_steps: int,
+        image_count: int,
+    ):
         # epoch 설정
-        epoch_count = training_config.total_steps / image_count
-        print(f"image_count : {image_count}, epoch_count : {epoch_count}")
+        print(f"image_count : {image_count}, epoch : {epoch}, total_steps : {total_steps}")
 
         # config file 세팅
-        self._update_training_config_file(lora_model_name=lora_model_name, epoch_count=epoch_count)
+        self._update_training_config_file(
+            lora_model_name=lora_model_name,
+            epoch=epoch,
+            total_steps=total_steps,
+        )
         
         # 전체 명령어 구성
         training_command = (
@@ -176,53 +216,38 @@ class RequestHandler:
         return training_command
 
 
-    def _process_training_request(self, message: UserFaceTrainingJobMQConsumeMessage) -> int:
+    def _process_training_request(self, message: TrainingJobMQConsumeMessage) -> int:
         start_time = time.time()
 
         # 학습 디렉토리 세팅
         image_dir_path = self._set_train_dir(gender=message.gender)
 
         # 이미지 다운로드
-        self._download_images(image_dir_path=image_dir_path, s3_key_list=message.s3_key_list)
+        self._download_images(image_dir_path=image_dir_path, s3_key_list=message.uploaded_image_s3_keys)
 
         # 학습 명령어 구성
-        training_command = self._build_command(lora_model_name=message.lora_model_name, image_count=len(message.s3_key_list))
+        training_command = self._build_command(
+            lora_model_name=message.user_hair_lora_name,
+            epoch=message.epoch,
+            total_steps=message.total_steps,
+            image_count=len(message.uploaded_image_s3_keys),
+        )
 
         # 학습 시작
         is_success, training_time_sec = self._start_training(training_command)
 
         if not is_success:
-            print(f"학습 실패: {message.user_face_training_job_id} {training_time_sec}초")
+            print(f"학습 실패: {message.training_job_id} {training_time_sec}초")
             raise Exception("학습 실패")
 
         # 모델 파일을 S3에 업로드
-        model_file_path = os.path.join(training_config.output_dir_path, f"{message.lora_model_name}.safetensors")
-        self._upload_model_to_s3(model_file_path, message.model_s3_key, retry_count=3)
+        model_file_path = os.path.join(training_config.output_dir_path, f"{message.user_hair_lora_name}.safetensors")
+        self._upload_model_to_s3(model_file_path, message.user_hair_lora_s3_key, retry_count=3)
 
         # s3 업로드 시간까지 포함한 전체 시간
         return int(time.time() - start_time)
 
 
-    def handle_training_request(self, ch, method, properties, body: bytes):
-        dict_data = json.loads(body)
-        message = UserFaceTrainingJobMQConsumeMessage(**dict_data)
-        try:
-            whole_process_time_sec = self._process_training_request(message)
-            is_success = True
-        except Exception as e:
-            print(f"학습 요청 실패: {e}")
-            whole_process_time_sec = 0
-            is_success = False
-        finally:
-            self._publish_message(
-                message=UserFaceTrainingJobMQPublishMessage(
-                    is_success=is_success,
-                    user_face_training_job_id=message.user_face_training_job_id,
-                    model_s3_key=message.model_s3_key,
-                    lora_model_name=message.lora_model_name,
-                    actual_training_time_sec=whole_process_time_sec,
-                )
-            )
 
 
     def _start_training(self, training_command: str) -> Tuple[bool, int]:

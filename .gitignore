@@ -63,9 +63,9 @@ venv*
 
 training_logs/*
 
-hairbe/models/*
-!hairbe/models/.gitkeep
-hairbe/train
+ehemo/models/*
+!ehemo/models/.gitkeep
+ehemo/train
 
-hairbe/log/*
-hairbe/train_config.toml
+ehemo/log/*
+ehemo/train_config.toml
