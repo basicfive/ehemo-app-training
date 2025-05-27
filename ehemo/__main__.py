@@ -39,7 +39,7 @@ async def main():
         logger.info(f"메시지 소비 시작 - 큐: {rabbit_mq_config.RABBITMQ_TRAINING_CONSUME}")
         await mq_service.start_consuming(
             consume_queue=rabbit_mq_config.RABBITMQ_TRAINING_CONSUME,
-            process_message_func=request_handler.process_training_message
+            process_message_func=request_handler.handle_training_request
         )
         
     except Exception as e:

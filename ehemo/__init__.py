@@ -6,5 +6,9 @@ EHEMO Training Application
 __version__ = "2.0.0"
 
 from dotenv import load_dotenv
+import os
 
-load_dotenv()
+env = os.getenv('ENVIRONMENT', 'dev')
+load_dotenv(f'.env.{env}')
+
+from ehemo.config import *

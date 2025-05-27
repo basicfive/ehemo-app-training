@@ -30,7 +30,7 @@ class RequestHandler:
         # 별도의 스레드 풀 생성 (학습은 CPU 집약적 작업이므로)
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
  
-    async def handle_training_request(self, ch, method, properties, body: bytes):
+    async def handle_training_request(self, body: bytes):
         """동기 방식의 메시지 핸들러 (기존 코드)"""
         dict_data = json.loads(body)
         message = TrainingJobMQConsumeMessage(**dict_data)
@@ -53,7 +53,7 @@ class RequestHandler:
                     user_hair_lora_s3_key=message.user_hair_lora_s3_key,
                     user_hair_lora_name=message.user_hair_lora_name,
                     actual_training_time_sec=whole_process_time_sec,
-                ).model_dump_json()
+                )
             )
    
     async def _publish_message_async(self, message: TrainingJobMQPublishMessage):

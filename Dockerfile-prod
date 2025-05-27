@@ -1,0 +1,32 @@
+FROM nvidia/cuda:12.2.0-base-ubuntu22.04
+
+ENV ENVIRONMENT=prod
+ENV DEBIAN_FRONTEND=noninteractive
+
+# CUDA 라이브러리 경로 설정
+# ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64:${LD_LIBRARY_PATH}"
+
+RUN apt-get update && \
+    apt-get install -y \
+    python3.10 \
+    python3-pip \
+    python3.10-venv \
+    python3-tk \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    build-essential \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python 3.10을 기본 파이썬으로 설정
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
+
+WORKDIR /app
+
+COPY . /app/
+
+CMD ["./setup.sh"]

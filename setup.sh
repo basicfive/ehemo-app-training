@@ -191,7 +191,8 @@ install_python_dependencies() {
 
   # Switch to local virtual env
   echo "Switching to virtual Python environment."
-  if ! inDocker; then
+  # Create virtual environment regardless of Docker status
+  if [ ! -d "$DIR/venv" ]; then
     if command -v python3.10 >/dev/null; then
       python3.10 -m venv "$DIR/venv"
     elif command -v python3 >/dev/null; then
@@ -201,10 +202,10 @@ install_python_dependencies() {
       echo "Cannot proceed with the python steps."
       return 1
     fi
-
-    # Activate the virtual environment
-    source "$DIR/venv/bin/activate"
   fi
+
+  # Activate the virtual environment
+  source "$DIR/venv/bin/activate"
 
   case "$OSTYPE" in
     "lin"*)
@@ -227,7 +228,7 @@ install_python_dependencies() {
       ;;
   esac
 
-  if [ -n "$VIRTUAL_ENV" ] && ! inDocker; then
+  if [ -n "$VIRTUAL_ENV" ]; then
     if command -v deactivate >/dev/null; then
       echo "Exiting Python virtual environment."
       deactivate

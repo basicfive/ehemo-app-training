@@ -8,9 +8,7 @@ __pycache__/
 venv/
 **/.hadolint.yml
 **/*.log
-**/.git
 **/.gitignore
-**/.env
 **/.github
 **/.vscode
 **/*.ps1
