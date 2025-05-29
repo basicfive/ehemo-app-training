@@ -1,7 +1,7 @@
 services:
   ai-service:
-    image: radiantjade/ehemo-app-training:final2
-    command: ["/bin/bash", "-c", "python -m ehemo"]
+    image: radiantjade/ehemo-app-training:final
+    command: ["/bin/bash", "-c", "source venv/bin/activate && python -m ehemo"]
     volumes:
       - ./models/checkpoints:/app/ehemo/models/checkpoints
       - ./models/vae:/app/ehemo/models/vae

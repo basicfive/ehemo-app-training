@@ -17,11 +17,6 @@ class TrainingConfig(BaseModel):
     clip_path: str = os.path.join(ROOT_DIR, "ehemo", "models", "vae", "clip_l.safetensors")
     vae_path: str = os.path.join(ROOT_DIR, "ehemo", "models", "vae", "ae.safetensors")
 
-    # base_model_path: str = "/home/hwichanjeon/models/checkpoints/flux1-dev-fp8.safetensors"
-    # t5xxl_path: str = "/home/hwichanjeon/models/vae/t5xxl_fp16.safetensors"
-    # clip_path: str = "/home/hwichanjeon/models/vae/clip_l.safetensors"
-    # vae_path: str = "/home/hwichanjeon/models/vae/ae.safetensors"
-
     # train
     train_dir_path: str = os.path.join(ROOT_DIR, "ehemo", "train")
     train_data_dir_path: str = os.path.join(ROOT_DIR, "ehemo", "train", "img")

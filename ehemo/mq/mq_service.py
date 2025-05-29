@@ -66,7 +66,8 @@ class AsyncRabbitMQService:
             connection_string,
             ssl=True,
             ssl_context=ssl_context,
-            heartbeat=360,  # 하트비트 간격 설정 (기존 설정과 동일하게 360초)
+            heartbeat=600,  # 하트비트 간격을 10분으로 늘림 (기존 6분에서)
+            connection_attempts=3,  # 연결 재시도 횟수
         )
         
         self.channel = await self.connection.channel()
@@ -147,6 +148,7 @@ class AsyncRabbitMQService:
                 
                 # 비동기 처리용 내부 콜백
                 async def _on_message(message: aio_pika.IncomingMessage):
+                    message_acked = False
                     try:
                         logger.info(f"수신된 메시지: {message.body}")
                         
@@ -154,12 +156,24 @@ class AsyncRabbitMQService:
                         await process_message_func(message.body)
                         
                         # 모든 처리가 완료된 후 ack 전송
-                        await message.ack()
-                        logger.info(f"메시지 처리 완료 및 ack 전송: {message.message_id}")
+                        try:
+                            await message.ack()
+                            message_acked = True
+                            logger.info(f"메시지 처리 완료 및 ack 전송: {message.message_id}")
+                        except Exception as ack_error:
+                            logger.error(f"메시지 ack 전송 실패: {ack_error}")
+                            # ack 실패는 치명적이지 않으므로 계속 진행
+                            
                     except Exception as e:
                         logger.error(f"메시지 처리 중 오류 발생: {e}")
-                        # 오류 발생 시에도 ack 처리 (재처리 방지, 필요시 nack로 변경 가능)
-                        await message.ack()
+                        # 오류 발생 시에도 ack 처리 시도 (재처리 방지, 필요시 nack로 변경 가능)
+                        if not message_acked:
+                            try:
+                                await message.ack()
+                                logger.info("오류 발생 후 메시지 ack 처리 완료")
+                            except Exception as ack_error:
+                                logger.error(f"오류 발생 후 메시지 ack 실패: {ack_error}")
+                                # 채널이 이미 닫혀있을 수 있으므로 무시
                 
                 # prefetch_count=1로 설정하여 한 번에 하나의 메시지만 가져오도록 함
                 await self.channel.set_qos(prefetch_count=1)

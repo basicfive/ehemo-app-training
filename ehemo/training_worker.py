@@ -4,9 +4,10 @@ import os
 import json
 import subprocess
 import asyncio
-import concurrent.futures
 import logging
-from typing import Tuple, List
+import multiprocessing
+import queue
+from typing import Tuple, List, Optional
 from datetime import datetime
 from enum import Enum, auto
 from ehemo.config import training_config
@@ -19,57 +20,125 @@ from ehemo.ehemo_utils import get_extension_from_content_type
 
 logger = logging.getLogger(__name__)
 
-class RequestHandler:
-    def __init__(
-        self,
-        s3_client: S3Client,
-        message_publisher: AsyncRabbitMQService,
-    ):
+class TrainingWorker:
+    """독립적인 프로세스에서 실행되는 학습 워커"""
+    
+    def __init__(self, request_queue: multiprocessing.Queue, result_queue: multiprocessing.Queue, s3_client):
+        self.request_queue = request_queue
+        self.result_queue = result_queue
         self.s3_client = s3_client
-        self.message_publisher = message_publisher
-        # 별도의 스레드 풀 생성 (학습은 CPU 집약적 작업이므로)
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
- 
-    async def handle_training_request(self, body: bytes):
-        """동기 방식의 메시지 핸들러 (기존 코드)"""
-        dict_data = json.loads(body)
-        message = TrainingJobMQConsumeMessage(**dict_data)
+        self.logger = logging.getLogger(f"TrainingWorker-{os.getpid()}")
+        
+    def run(self):
+        """워커 메인 루프"""
+        self.logger.info(f"학습 워커 시작 (PID: {os.getpid()})")
+        
+        while True:
+            try:
+                # 큐에서 요청 대기 (타임아웃 설정으로 주기적으로 체크)
+                try:
+                    # 큐에서 직렬화된 데이터 수신
+                    request_data = self.request_queue.get(timeout=5)
+                except queue.Empty:
+                    continue
+                
+                if request_data is None:  # 종료 신호
+                    self.logger.info("학습 워커 종료 신호 수신")
+                    break
+                
+                # pydantic 모델로 역직렬화
+                training_request = TrainingJobMQConsumeMessage.model_validate(request_data)
+                self.logger.info(f"학습 요청 처리 시작: {training_request.training_job_id}")
+                
+                # 학습 처리
+                result = self._process_training_request(training_request)
+                
+                # 결과를 결과 큐에 전달 (pydantic 모델을 직렬화해서 전송)
+                self.result_queue.put(result.model_dump())
+                self.logger.info(f"학습 요청 처리 완료: {training_request.training_job_id}")
+                
+            except Exception as e:
+                self.logger.error(f"학습 워커에서 예외 발생: {e}")
+                if 'training_request' in locals():
+                    # 메시지에서 필요한 정보 추출
+                    message_dict = training_request.message_dict
+                    training_job_id = message_dict.get('training_job_id', 'unknown')
+                    user_hair_lora_s3_key = message_dict.get('user_hair_lora_s3_key', '')
+                    user_hair_lora_name = message_dict.get('user_hair_lora_name', '')
+                    
+                    error_result = TrainingResult(
+                        is_success=False, 
+                        training_time_sec=0, 
+                        training_job_id=training_job_id,
+                        user_hair_lora_s3_key=user_hair_lora_s3_key,
+                        user_hair_lora_name=user_hair_lora_name,
+                        error_msg=str(e)
+                    )
+                    # 에러 결과도 큐에 전달
+                    self.result_queue.put(error_result.model_dump())
+
+    def _process_training_request(self, message: TrainingJobMQConsumeMessage) -> TrainingJobMQPublishMessage:
+        """학습 요청 처리"""
         try:
-            whole_process_time_sec = await asyncio.get_event_loop().run_in_executor(
-                self.executor, 
-                self._process_training_request, 
-                message
-            )
-            is_success = True
-        except Exception as e:
-            logger.error(f"학습 요청 실패: {e}")
-            whole_process_time_sec = 0
-            is_success = False
-        finally:
-            await self._publish_message_async(
-                message=TrainingJobMQPublishMessage(
-                    is_success=is_success,
-                    training_job_id=message.training_job_id,
-                    user_hair_lora_s3_key=message.user_hair_lora_s3_key,
-                    user_hair_lora_name=message.user_hair_lora_name,
-                    actual_training_time_sec=whole_process_time_sec,
-                )
-            )
-   
-    async def _publish_message_async(self, message: TrainingJobMQPublishMessage):
-        """비동기적으로 상태 업데이트를 MQ로 전송"""
-        if self.message_publisher is None:
-            logger.error("메시지 발행자가 설정되지 않았습니다.")
-            return
             
-        try:
-            await self.message_publisher.publish_message(
-                publish_queue=rabbit_mq_config.RABBITMQ_TRAINING_PUBLISH,
-                message=message.model_dump_json(),
+            self.logger.info(f"학습 서비스 - 요청 처리 시작: {message.training_job_id}")
+            
+            # 기존 로직 사용
+            whole_process_time_sec = self._execute_training(message)
+            
+            self.logger.info(f"학습 서비스 - 처리 완료: {message.training_job_id}, 소요시간: {whole_process_time_sec}초")
+            
+            return TrainingJobMQPublishMessage(
+                is_success=True, 
+                training_time_sec=whole_process_time_sec, 
+                training_job_id=message.training_job_id,
+                user_hair_lora_s3_key=message.user_hair_lora_s3_key,
+                user_hair_lora_name=message.user_hair_lora_name,
+                actual_training_time_sec=whole_process_time_sec,
             )
-            logger.info(f"처리 결과 메시지 발행 성공: {message.training_job_id}")
+            
         except Exception as e:
-            logger.error(f"처리 결과 메시지 발행 실패: {e}")
+            self.logger.error(f"학습 서비스 - 처리 실패: {e}")
+           
+            return TrainingJobMQPublishMessage(
+                is_success=False, 
+                training_time_sec=0, 
+                training_job_id=message.training_job_id,
+                user_hair_lora_s3_key=message.user_hair_lora_s3_key,
+                user_hair_lora_name=message.user_hair_lora_name,
+                actual_training_time_sec=0,
+            )
+
+    def _execute_training(self, message: TrainingJobMQConsumeMessage) -> int:
+        start_time = time.time()
+
+        # 학습 디렉토리 세팅
+        image_dir_path = self._set_train_dir(gender=message.gender)
+
+        # 이미지 다운로드
+        self._download_images(image_dir_path=image_dir_path, s3_key_list=message.uploaded_image_s3_keys)
+
+        # 학습 명령어 구성
+        training_command = self._build_command(
+            lora_model_name=message.user_hair_lora_name,
+            epoch=message.epoch,
+            total_steps=message.total_steps,
+            image_count=len(message.uploaded_image_s3_keys),
+        )
+
+        # 학습 시작
+        is_success, training_time_sec = self._start_training(training_command)
+
+        if not is_success:
+            print(f"학습 실패: {message.training_job_id} {training_time_sec}초")
+            raise Exception("학습 실패")
+
+        # 모델 파일을 S3에 업로드
+        model_file_path = os.path.join(training_config.output_dir_path, f"{message.user_hair_lora_name}.safetensors")
+        self._upload_model_to_s3(model_file_path, message.user_hair_lora_s3_key, retry_count=3)
+
+        # s3 업로드 시간까지 포함한 전체 시간
+        return int(time.time() - start_time)
 
     def _upload_model_to_s3(self, file_path: str, s3_key: str, retry_count: int = 0) -> bool:
         print(f"모델 파일 S3 업로드 시도: {file_path} -> {s3_key}")
@@ -158,7 +227,7 @@ class RequestHandler:
             pass
 
         train_repeat_count = 1
-        trigger_word = "sks"
+        trigger_word = "ohwx"
         class_word = "man" if gender == Gender.MALE else "woman"
         image_dir_name = f"{train_repeat_count}_{trigger_word} {class_word}"
 
@@ -214,41 +283,6 @@ class RequestHandler:
         )
         print("training command : ", training_command)
         return training_command
-
-
-    def _process_training_request(self, message: TrainingJobMQConsumeMessage) -> int:
-        start_time = time.time()
-
-        # 학습 디렉토리 세팅
-        image_dir_path = self._set_train_dir(gender=message.gender)
-
-        # 이미지 다운로드
-        self._download_images(image_dir_path=image_dir_path, s3_key_list=message.uploaded_image_s3_keys)
-
-        # 학습 명령어 구성
-        training_command = self._build_command(
-            lora_model_name=message.user_hair_lora_name,
-            epoch=message.epoch,
-            total_steps=message.total_steps,
-            image_count=len(message.uploaded_image_s3_keys),
-        )
-
-        # 학습 시작
-        is_success, training_time_sec = self._start_training(training_command)
-
-        if not is_success:
-            print(f"학습 실패: {message.training_job_id} {training_time_sec}초")
-            raise Exception("학습 실패")
-
-        # 모델 파일을 S3에 업로드
-        model_file_path = os.path.join(training_config.output_dir_path, f"{message.user_hair_lora_name}.safetensors")
-        self._upload_model_to_s3(model_file_path, message.user_hair_lora_s3_key, retry_count=3)
-
-        # s3 업로드 시간까지 포함한 전체 시간
-        return int(time.time() - start_time)
-
-
-
 
     def _start_training(self, training_command: str) -> Tuple[bool, int]:
         try:
@@ -335,7 +369,7 @@ class RequestHandler:
                                 f.write(f"\n=== Training interrupted and terminated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
                                 f.write(f"Exit code: {process.returncode}\n")
                         except Exception as kill_error:
-                            print(f"Error while terminating process: {str(kill_error)}")
+                            print(f"Error while terminating process: {kill_error}")
                         
                         # 인터럽트로 인한 학습 중단은 실패로 간주
                         actual_training_time_sec = int(time.time() - start_time)
@@ -353,4 +387,11 @@ class RequestHandler:
             print(f"Error in start_training: {str(e)}")
             # 함수 실행 중 예외 발생 시 실패로 간주하고 0초 반환 (훈련이 시작되지 않았으므로)
             return False, 0
+
+
+# 워커 프로세스 시작 함수
+def start_training_worker(request_queue: multiprocessing.Queue, result_queue: multiprocessing.Queue, s3_client):
+    """워커 프로세스에서 실행될 함수"""
+    worker = TrainingWorker(request_queue, result_queue, s3_client)
+    worker.run()
 

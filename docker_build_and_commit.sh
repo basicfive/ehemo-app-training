@@ -22,4 +22,4 @@ docker rm init_container
 docker rmi ehemo-app-training:init
 
 # 6. 이미지 푸시
-# docker push radiantjade/ehemo-app-training:final
+docker push radiantjade/ehemo-app-training:final
